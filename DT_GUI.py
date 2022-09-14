@@ -5,26 +5,19 @@ import re
 from typing import Dict
 import PySimpleGUI as sg
 import subprocess
+import smtplib
+from email.message import EmailMessage
 
 DETECTION_TEMPLATE = '/nfs/scratch/athul/DetTrackGUI/DetectionNTracking_template.m'
 DETECTION_RESULT = 'DetectionNTracking_result.m'
-CALIBRATION_DIRNAME = 'LLSCalibration'
+CALIBRATION_DIRNAME = 'LLSCalibrations'
 
-# TODO get rid of Cam_ and change folder check for channels, add 514 channel
-CHNAME_DICT = {
-    '488' : 'ch488nmCamA',
-    '560' : 'ch560nmCamB',
-    '642' : 'ch642nmCamA'
-}
+CHANNELS = []
 
-# TODO add more keys with new channel 514
-CHANNEL_KEYS = ['-CH-PRIMARY-NONE-', '-CH-PRIMARY-488-', '-CH-PRIMARY-560-', '-CH-PRIMARY-642-',
-'-CH-SECONDARY-NONE-', '-CH-SECONDARY-488-', '-CH-SECONDARY-560-', '-CH-SECONDARY-642-',
-'-CH-SECONDARY2-NONE-', '-CH-SECONDARY2-488-', '-CH-SECONDARY2-560-', '-CH-SECONDARY2-642-'
-]
+CHNAME_DICT = {}
 
-MKDIR = False
-RUN = False
+MKDIR = True
+RUN = MKDIR
 
 # TODO get calib path from experiment, cs, and parent_dir
 def get_calibration_path(dir_path):
@@ -35,7 +28,11 @@ def get_calibration_path(dir_path):
         calibration_path = path.join(path.dirname(dir_path), CALIBRATION_DIRNAME)
     else:
         pass
-    return calibration_path
+    
+    if not path.isdir(calibration_path):
+        return (False, f'Error: Calibration folder not found. Ensure it is named \"{CALIBRATION_DIRNAME}\" and is in the same directory as the Cover Slip directories.')
+
+    return (True, calibration_path)
 
 def list_to_qstr(lst: list):
     lst = lst.copy()
@@ -48,7 +45,6 @@ def check_dir(path: str, option: str):
     basename = os.path.basename(path)
     return (basename.startswith('CS') and option == 'Cover Slip') or (basename.startswith('Ex') and option == 'Experiment')
 
-# TODO add parallel cluster profile and etc
 def fill_dnt_template(condDir: str, chNames_lst: list, markers_lst: list, data_filepath: str, calibration_path: str, zspace: float, sigma_values: str, overwrite_values: str, tracking_radius_values: str, backup_dir: str, calc_img_proj: bool, bleach: bool):
     condDir = '\'' + condDir + '\''
     chNames = list_to_qstr(chNames_lst)
@@ -62,6 +58,15 @@ def fill_dnt_template(condDir: str, chNames_lst: list, markers_lst: list, data_f
     if RUN and not path.exists(backup_dir):
         return (False, 'Error: backup folder not found in primary channel\'s analysis directory. Please ensure directories follow procedural organization and naming practices')
 
+    # PSFs, Default Sigmas Fill
+    psfs = ''
+    default_sigmas_calc = ''
+    default_sigmas = ''
+    for channel in CHANNELS:
+        psfs += f'PSF{channel} = \'{channel}totalPSF.tif\';\n'
+        default_sigmas_calc += f'[sigmaXY{channel}, sigmaZ{channel}] = GU_estimateSigma3D([PSFrt filesep],PSF{channel});\n'
+        default_sigmas += f'sigmaZ{channel}corr = sigmaZ{channel}/zRatio;\n'
+
     # Read in the file
     with open(DETECTION_TEMPLATE, 'r') as file:
         filedata = file.read()
@@ -73,6 +78,9 @@ def fill_dnt_template(condDir: str, chNames_lst: list, markers_lst: list, data_f
         filedata = filedata.replace('%data_filepath%', data_filepath)
         filedata = filedata.replace('%calibration_path%', calibration_path)
         filedata = filedata.replace('%zspace%', zspace)
+        filedata = filedata.replace('%psfs%', psfs)
+        filedata = filedata.replace('%default_sigmas_calc%', default_sigmas_calc)
+        filedata = filedata.replace('%default_sigmas%', default_sigmas)
         filedata = filedata.replace('%sigma_values%', sigma_values)
         filedata = filedata.replace('%overwrite_values%', overwrite_values)
         filedata = filedata.replace('%tracking_radius_values%', tracking_radius_values)
@@ -114,13 +122,14 @@ def get_zspace(experiment_path: str):
 
     return (True, zspace_str)
 
-def get_sigmas(window, values: Dict, channels: list):
-    sigmas = []
-    for channel in channels:
-        col_key = '-CS' + channel + 'COL-'
-        cs_key = '-CS' + channel + '-' 
-        sigmaXY_key = '-CS' + channel + 'XY-'
-        sigmaZ_key = '-CS' + channel + 'Z-'
+def get_sigmas(window, values: Dict, channels_index: list):
+    sigmas = [] # TODO check this
+    for i in channels_index:
+        i_str = str(i)
+        col_key = '-CS' + i_str + 'COL-'
+        cs_key = '-CS' + i_str + '-' 
+        sigmaXY_key = '-CS' + i_str + 'XY-'
+        sigmaZ_key = '-CS' + i_str + 'Z-'
         if window[col_key].visible and values[cs_key]:
             sigmaXY = values[sigmaXY_key]
             sigmaZ = values[sigmaZ_key]
@@ -129,9 +138,10 @@ def get_sigmas(window, values: Dict, channels: list):
                 float(sigmaZ)
             except Exception as e:
                 return (False, 'Error: Please enter both fields and only use floats for custom sigma values.')
-            sigmas.append(sigmaXY + ', ' + sigmaZ)
+            sigmas.append(f'{sigmaXY}, {sigmaZ}')
         else:
-            sigmas.append('sigmaXY' + channel + ', sigmaZ' + channel + 'corr')
+            channel = values[f'-CH-{i}-']
+            sigmas.append(f'sigmaXY{channel}, sigmaZ{channel}corr')
 
 
     return (True, '; '.join(sigmas)) 
@@ -154,78 +164,50 @@ def get_overwrites(values: Dict):
 def check_one_or_none(a: bool, b: bool, c: bool):
     return a + b + c <= 1
 
-# TODO better way to do this?
 def get_channels(values: Dict):
-    primary_none = values['-CH-PRIMARY-NONE-']
-    secondary_none = values['-CH-SECONDARY-NONE-']
-    secondary2_none = values['-CH-SECONDARY2-NONE-']
+    # check if primary channel is filled
+    if values['-CH-1-'] == '':
+        return (False, 'Error: Ensure primary channel is not empty.', None, None)
 
-    if primary_none:
-        return (False, 'Error: Ensure primary channel is not "None".', None)
-
-    if (not primary_none and values['-PRIMARY-MARKER-'] == '') or (not secondary_none and values['-SECONDARY-MARKER-'] == '') or (not secondary2_none and values['-SECONDARY2-MARKER-'] == ''):
-        return (False, 'Error: Ensure marker is entered for selected channels.', None)
-
-    primary_488 = values['-CH-PRIMARY-488-']
-    secondary_488 = values['-CH-SECONDARY-488-']
-    secondary2_488 = values['-CH-SECONDARY2-488-']
-
-    if not check_one_or_none(primary_488, secondary_488, secondary2_488):
-        return (False, 'Error: Ensure a wavelength is selected only for one channel.', None)
-
-    primary_560 = values['-CH-PRIMARY-560-']
-    secondary_560 = values['-CH-SECONDARY-560-']
-    secondary2_560 = values['-CH-SECONDARY2-560-']
-
-    if not check_one_or_none(primary_560, secondary_560, secondary2_560):
-        return (False, 'Error: Ensure a wavelength is selected only for one channel.', None)
-
-    primary_642 = values['-CH-PRIMARY-642-']
-    secondary_642 = values['-CH-SECONDARY-642-']
-    secondary2_642 = values['-CH-SECONDARY2-642-']
-
-    if not check_one_or_none(primary_642, secondary_642, secondary2_642):
-        return (False, 'Error: Ensure a wavelength is selected only for one channel.', None)
-    
+    # check if selected channels have markers filled
     channels = []
+    channels_index = []
     markers = []
-    # Primary channel
-    if primary_488:
-        channels.append('488')
-    elif primary_560:
-        channels.append('560')
-    elif primary_642:
-        channels.append('642')
-    markers.append(values['-PRIMARY-MARKER-'])
-    # Secondary channel
-    if secondary_488:
-        channels.append('488')
-    elif secondary_560:
-        channels.append('560')
-    elif secondary_642:
-        channels.append('642')
+    for i in range(1, 4):
+        channel = values[f'-CH-{i}-']
+        marker = values[f'-MARKER-{i}-']
+        if channel != '':
+            if marker == '':
+                return (False, 'Error: Ensure marker is entered for selected channels.', None, None)
+            channels.append(channel)
+            channels_index.append(i)
+            markers.append(marker)
 
-    if not secondary_none:
-        markers.append(values['-SECONDARY-MARKER-'])
+    # check channels selected only once
+    if len(channels) != len(set(channels)):
+        return (False, 'Error: Ensure a wavelength is selected only for one channel.', None, None)
 
-    # Secondary2 channel
-    if secondary2_488:
-        channels.append('488')
-    elif secondary2_560:
-        channels.append('560')
-    elif secondary2_642:
-        channels.append('642')
-    
-    if not secondary2_none:
-        markers.append(values['-SECONDARY2-MARKER-'])
+    return (True, channels, markers, channels_index)
 
-    return (True, channels, markers)
+def load_channels(calibration_path):
+    channels = filter(lambda x: x.endswith('totalPSF.tif'), os.listdir(calibration_path))
+    channels = list(map(lambda x: re.findall(r'\d+', x)[0], channels))
+    channels.sort()
+    if not channels:
+        return (False, 'Error: No channels found in calibration folder')
 
+    global CHANNELS
+    CHANNELS = channels
+
+    return (True, channels)
+
+# TODO: update for exisitng channels
 def build_dict(experiment_path):
-    channel_dirs = list(filter(lambda x: x.startswith('ch'), os.listdir()))
+    global CHNAME_DICT
+    channel_dirs = list(filter(lambda x: x.startswith('ch'), os.listdir(experiment_path)))
 
     for channel_dir in channel_dirs:
-        num = re.findall(r'\d+', channel_dir)
+        num = re.findall(r'\d+', channel_dir)[0]
         CHNAME_DICT[num] = channel_dir
 
 def check_channel_paths(chNames: list, experiment_path: str):
@@ -275,32 +257,34 @@ def get_backup_dir(apath: str, backup_dirname: str, mkdir: bool=True):
 def get_data_filename(channels: list):
     return 'data_' + '_'.join(channels)
 
-def any_selected(d, lst):
-    return bool(sum([d[a] for a in lst]))
-    
-def show_sigmas(window, values: Dict, event: str):
-    bool_488 = any_selected(values, CHANNEL_KEYS[1::4])
-    bool_560 = any_selected(values, CHANNEL_KEYS[2::4])
-    bool_642 = any_selected(values, CHANNEL_KEYS[3::4])
-    
-    window['-CS488COL-'].update(visible=bool_488)
-    window['-CS560COL-'].update(visible=bool_560)
-    window['-CS642COL-'].update(visible=bool_642)
+def control_channel_selection(window, values: Dict, event: str):
+    channel_selected = values[event]
+    selected_lst = [False, False, False]
+    for i in range (1, 4):
+        key = f'-CH-{i}-'
+        if values[key] != '':
+            selected_lst[i - 1] = True
+        if event != key and values[key] == channel_selected:
+            window[key].update('')
+            window[f'-MARKER-{i}-'].update('')
+            selected_lst[i - 1] = False
+        
+    return selected_lst
 
-    window['-CS488XYT-'].update(visible=values['-CS488-'])
-    window['-CS488XY-'].update(visible=values['-CS488-'])
-    window['-CS488ZT-'].update(visible=values['-CS488-'])
-    window['-CS488Z-'].update(visible=values['-CS488-'])
+def update_channel_dropdowns(window):
+    dropdown_list = [''] + CHANNELS
+    for i in range(1, 4):
+        window[f'-CH-{i}-'].update(values=dropdown_list)
+        window[f'-MARKER-{i}-'].update('')
 
-    window['-CS560XYT-'].update(visible=values['-CS560-'])
-    window['-CS560XY-'].update(visible=values['-CS560-'])
-    window['-CS560ZT-'].update(visible=values['-CS560-'])
-    window['-CS560Z-'].update(visible=values['-CS560-'])
-    
-    window['-CS642XYT-'].update(visible=values['-CS642-'])
-    window['-CS642XY-'].update(visible=values['-CS642-'])
-    window['-CS642ZT-'].update(visible=values['-CS642-'])
-    window['-CS642Z-'].update(visible=values['-CS642-'])
+def show_sigmas(window, values: Dict, selected_lst: list, event: str):
+    for i in range(1, 4):
+        selected = selected_lst[i - 1]
+        window[f'-CS{i}COL-'].update(visible=selected)
+        window[f'-CS{i}XYT-'].update(visible=values[f'-CS{i}-'])
+        window[f'-CS{i}XY-'].update(visible=values[f'-CS{i}-'])
+        window[f'-CS{i}ZT-'].update(visible=values[f'-CS{i}-'])
+        window[f'-CS{i}Z-'].update(visible=values[f'-CS{i}-'])
 
 def run_cmd(det_track_path: str):
     matlab_cmd = f'matlab -nodisplay -nosplash -nodesktop -r "run(\'{det_track_path}\');exit;" | tail -n +13'
@@ -313,68 +297,71 @@ def run_cmd(det_track_path: str):
     return (p1.stderr == '', p1.stderr)
 
 # TODO deal with possible errors, add files after bleach_in_a_box
-def move_files_to_backup(apath: str, backup_dir):
-    files = [path.join(apath, 'Detection3D.mat'), path.join(apath, 'ProcessedTracks.mat'), path.join(apath, 'RotatedTracks.mat'), path.join(apath, 'trackedFeatures.mat')]
+def move_files_to_backup(apath: str, backup_dir: str, bleach: bool):
+    files = ['Detection3D.mat', 'ProcessedTracks.mat', 'RotatedTracks.mat', 'trackedFeatures.mat']
     
+    if bleach:
+        files.append('orig_ProcessedTracks.mat')
+
+    files = list(map(lambda x: path.join(apath, x), files))
+
     for file in files:
         p = subprocess.run(f'cp {file} {backup_dir}', capture_output=True, text=True, shell=True)
         print(f'stderr {file}: ' + p.stderr)
 
 def run_experiment(window, values: Dict, experiment_path: str, backup_dirname: str=None):
-    calibration_path = get_calibration_path(experiment_path)
-    print(calibration_path)
-    if not path.isdir(calibration_path):
-        return (False, f'Error: Calibration folder not found. Ensure it is named \"{CALIBRATION_DIRNAME}\" and is in the same directory as the Cover Slip directories.')
+    calibration_success, calibration_path = get_calibration_path(experiment_path)
+    print('Calibration dir:', calibration_path)
+    if not calibration_success:
+        return (calibration_success, calibration_path)
     
-    ch_success, channels, markers = get_channels(values)
+    ch_success, channels, markers, channels_index = get_channels(values)
     if not ch_success:
         return (ch_success, channels)
 
-    build_dict(channels)
-    print(CHNAME_DICT)
+    build_dict(experiment_path)
+    print('Channel name dictionary:', CHNAME_DICT)
 
     chNames = list(map(lambda x: CHNAME_DICT[x], channels))
-    print(chNames)
+    print('Channel names:', chNames)
 
     if not check_channel_paths(chNames, experiment_path):
         return (False, f'Error: Channel data directory not found in experiment directory {experiment_path}. Please ensure it is there.')
 
-    print(*markers)
+    print('Markers:', markers)
 
     zspace_success, zspace = get_zspace(experiment_path)
     if not zspace_success:
         return (zspace_success, zspace)
-    print(zspace)
+    print('Zspace:', zspace)
 
-    sigma_sucess, sigma_values = get_sigmas(window, values, channels)
+    sigma_sucess, sigma_values = get_sigmas(window, values, channels_index)
     if not sigma_sucess:
         return (sigma_sucess, sigma_values)
 
-    print(sigma_values)
+    print('Sigma Values:', sigma_values)
 
     overwrite_values = get_overwrites(values)
-    print(overwrite_values)
+    print('Overwrite Values:', overwrite_values)
 
     tracking_radius_success, tracking_radius_values = get_tracking_radius(values)
     if not tracking_radius_success:
         return (tracking_radius_success, tracking_radius_values)
-    print(tracking_radius_values)
+    print('Tracking Radius Values:', tracking_radius_values)
 
     apath = get_apath(experiment_path, chNames[0], mkdir=MKDIR)
-    print(apath)
+    print('Analysis Path:', apath)
   
     backup_dir = get_backup_dir(apath, backup_dirname, mkdir=MKDIR)
-    print(backup_dir)
+    print('Backup Dir:', backup_dir)
 
     data_filename = get_data_filename(channels)
-    print(data_filename)
+    print('Data Filename:', data_filename)
 
     data_filepath = path.join(backup_dir, data_filename)
 
     calc_img_proj = values['-CALCIMGPROJ-']
     bleach = values['-BLEACH-']
-    # cme_viewer = values['-CME_VIEWER-']
-    # labview = values['-LABVIEW-']
 
     fill_succes, result_path = fill_dnt_template(experiment_path, chNames, markers, data_filepath, calibration_path, zspace, sigma_values, overwrite_values, tracking_radius_values, backup_dir, calc_img_proj, bleach)
     
@@ -389,7 +376,7 @@ def run_experiment(window, values: Dict, experiment_path: str, backup_dirname: s
 
         print('Run worked :)')
 
-        move_files_to_backup(apath, backup_dir)
+        move_files_to_backup(apath, backup_dir, bleach)
 
     return (True, None)
 
@@ -398,10 +385,10 @@ def run_cover_slip(window, values: Dict, cs_path: str):
     experiment_lst = list(filter(lambda x: x.startswith('Ex'), os.listdir(cs_path)))
     if not experiment_lst:
         return (False, 'Error: No experiments found in cover slip directory. Please ensure experiments begin with "Ex"')
-    print(experiment_lst)
+    print('Experiment list:', experiment_lst)
 
     backup_dirname = datetime.now().strftime('backup_%m_%d_%Y_%H_%M')
-    print(backup_dirname)
+    print('Backupdir name:', backup_dirname)
 
     for experiment in experiment_lst:
         experiment_path = path.join(cs_path, experiment)
@@ -412,28 +399,35 @@ def run_cover_slip(window, values: Dict, cs_path: str):
 
     return (True, None)
     
+def send_email(recepient: str, success: bool):
+    if recepient == '':
+        return (True, 'No email')
+
+    try:
+        msg = EmailMessage()
+        if success:
+            msg.set_content('Hello! \n\nYour Detection & Tracking has finished running! Please check the GUI and your results.\n\nBest,\nMr. GUI')
+        else:
+            msg.set_content('Uh Oh! \n\nYour Detection & Tracking has come across an ERROR! Please check the GUI and your results.\n\nBest,\nMr. GUI')
+        msg['Subject'] = 'Detection & Tracking Update'
+        msg['From'] = 'tklab@tklab.hms.harvard.edu'
+        msg['To'] = recepient
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+
+        server.starttls()
+        server.login('tklab@tklab.hms.harvard.edu', 'Clathrin2020g')
+        server.send_message(msg)
+        server.quit()
+        print('Email Sent')
+        return (True, None)
+    except:
+        return (False, 'Bad email entered, please try again!')
+
 
 def main():        
     option_chosen = 'Cover Slip'
     sg.theme('Tan')
-
-    custom_sigma_488_col = [
-        [sg.Checkbox('Custom 488nm Sigmas', enable_events=True, key='-CS488-')],
-        [sg.Text('XY:', key='-CS488XYT-'), sg.In(size=(4,1), key='-CS488XY-')],
-        [sg.Text('Z: ', key='-CS488ZT-'), sg.In(size=(4,1), key='-CS488Z-')]
-    ]
-
-    custom_sigma_560_col = [
-        [sg.Checkbox('Custom 560nm Sigmas', enable_events=True, key='-CS560-')],
-        [sg.Text('XY:', key='-CS560XYT-'), sg.In(size=(4,1), key='-CS560XY-')],
-        [sg.Text('Z: ', key='-CS560ZT-'), sg.In(size=(4,1), key='-CS560Z-')]
-    ]
-
-    custom_sigma_642_col = [
-        [sg.Checkbox('Custom 642nm Sigmas', enable_events=True, key='-CS642-')],
-        [sg.Text('XY:', key='-CS642XYT-'), sg.In(size=(4,1), key='-CS642XY-')],
-        [sg.Text('Z: ', key='-CS642ZT-'), sg.In(size=(4,1), key='-CS642Z-')]
-    ]
 
     empty_col = [
         [sg.Text(' ')],
@@ -456,33 +450,15 @@ def main():
         ],
         # Primary channel
         [
-            sg.Text('Select primary channel*:', size=(30, 1)),
-            sg.Radio('None', 'primary-ch', default=True, enable_events=True, key=CHANNEL_KEYS[0]),
-            sg.Radio('488nm', 'primary-ch', default=False, enable_events=True, key=CHANNEL_KEYS[1]),
-            sg.Radio('560nm', 'primary-ch', default=False, enable_events=True, key=CHANNEL_KEYS[2]),
-            sg.Radio('642nm', 'primary-ch', default=False, enable_events=True, key=CHANNEL_KEYS[3]),
-            sg.Text('Enter a marker:'),
-            sg.In(size=(5,1), key='-PRIMARY-MARKER-')
+            sg.Text('Select channel #1 (primary)*:', size=(30, 1))
         ],
         # Secondary channel
         [
-            sg.Text('Select secondary channel:', size=(30, 1)),
-            sg.Radio('None', 'secondary-ch', default=True, enable_events=True, key=CHANNEL_KEYS[4]),
-            sg.Radio('488nm', 'secondary-ch', default=False, enable_events=True, key=CHANNEL_KEYS[5]),
-            sg.Radio('560nm', 'secondary-ch', default=False, enable_events=True, key=CHANNEL_KEYS[6]),
-            sg.Radio('642nm', 'secondary-ch', default=False, enable_events=True, key=CHANNEL_KEYS[7]),
-            sg.Text('Enter a marker:'),
-            sg.In(size=(5,1), key='-SECONDARY-MARKER-')
+            sg.Text('Select channel #2 (secondary):', size=(30, 1))
         ],
         # Secondary2 channel
         [
-            sg.Text('Select another secondary channel:', size=(30, 1)),
-            sg.Radio('None', 'secondary2-ch', default=True, enable_events=True, key=CHANNEL_KEYS[8]),
-            sg.Radio('488nm', 'secondary2-ch', default=False, enable_events=True, key=CHANNEL_KEYS[9]),
-            sg.Radio('560nm', 'secondary2-ch', default=False, enable_events=True, key=CHANNEL_KEYS[10]),
-            sg.Radio('642nm', 'secondary2-ch', default=False, enable_events=True, key=CHANNEL_KEYS[11]),
-            sg.Text('Enter a marker:'),
-            sg.In(size=(5,1), key='-SECONDARY2-MARKER-')
+            sg.Text('Select channel #3 (secondary):', size=(30, 1))
         ],
         # Tracking radius
         [
@@ -496,21 +472,22 @@ def main():
         [
             sg.Text('Overwrite:'),
             sg.Checkbox('Detection', key='-DETECTION-'),
-            sg.Checkbox('Tracking & Track Processing', key='-TRACKING-TRACKPROCESS-'),
+            sg.Checkbox('Tracking & Track Processing', key='-TRACKING-TRACKPROCESS-')
         ],
         # Custom Sigma Values
         [
-            sg.Column(empty_col, visible=True, key='-EMPTY-COL-'),
-            sg.Column(custom_sigma_488_col, element_justification='c', visible=False, key='-CS488COL-'),
-            sg.Column(custom_sigma_560_col, element_justification='c', visible=False, key='-CS560COL-'),
-            sg.Column(custom_sigma_642_col, element_justification='c', visible=False, key='-CS642COL-')
+            sg.Column(empty_col, visible=True, key='-EMPTY-COL-')
+            
         ],
         # Select run options
         [
             sg.Checkbox('Run GU_calcImageProjections', key='-CALCIMGPROJ-'),
             sg.Checkbox('Run bleach_in_a_box', key='-BLEACH-'),
-            # sg.Checkbox('Run GU_cme3d2dViewer', key='-CME_VIEWER-'),
-            # sg.Checkbox('Open MicroscopyBrowser_v4', key='-LABVIEW-')
+        ],
+        # Email
+        [
+            sg.Text('Enter your email to be notified of completion:'),
+            sg.Input(size=(30, 1), key='-EMAIL-')
         ],
         # Run button
         [
@@ -521,6 +498,26 @@ def main():
             sg.Text('* = Required')
         ]
     ]
+
+    # Adding channel and marker components to layout
+    for i in range(2, 5):
+        elem = layout[i]
+        elem.append(sg.Combo(values=CHANNELS, readonly=True, enable_events=True, size=(4, 1) ,key=f'-CH-{i - 1}-'))
+        elem.append(sg.Text('Enter a marker:'))
+        elem.append(sg.In(size=(5,1), key=f'-MARKER-{i - 1}-'))
+
+    # Adding custom sigma components to layout
+    custom_sigmas_cols = layout[7]
+
+    for i in range(1, 4):
+        cs_str = f'Channel #{i} Custom Sigmas' ## TODO 
+        custom_sigma_col = [
+            [sg.Checkbox(cs_str, enable_events=True, key=f'-CS{i}-')],
+            [sg.Text('XY:', key=f'-CS{i}XYT-'), sg.In(size=(4,1), key=f'-CS{i}XY-')],
+            [sg.Text('Z: ', key=f'-CS{i}ZT-'), sg.In(size=(4,1), key=f'-CS{i}Z-')]
+        ]
+        custom_sigmas_cols.append(sg.Column(custom_sigma_col, element_justification='c', visible=False, key=f'-CS{i}COL-'))
+
 
     window = sg.Window(title='Detection and Tracking', layout=layout, margins=(100,50)) 
     while True:
@@ -541,11 +538,21 @@ def main():
                 sg.Popup('Folder chosen does not match option selected. Please change the option or folder')
                 window['-FOLDER-'].update('')
             else:
-                pass # TODO grab channels from PSF
+                calibration_success, calibration_path = get_calibration_path(values['-FOLDER-'])
+                if not calibration_success:
+                    sg.Popup(calibration_path)  
+                else:    
+                    channels_success, channels = load_channels(calibration_path) 
+                    if not channels_success:
+                        sg.Popup(channels) 
+                    update_channel_dropdowns(window)
+                    print('Detected Channels:', channels)           
 
         elif event.startswith('-CH-') or 'CS' in event:
             window['-EMPTY-COL-'].update(visible=False)
-            show_sigmas(window, values, event)
+            selected_lst = control_channel_selection(window, values, event)
+    
+            show_sigmas(window, values, selected_lst, event)
 
         elif event == '-RUN-':
             print('RUNNING')
@@ -559,9 +566,14 @@ def main():
                 if not success:
                     sg.Popup(message)
 
+            email_sucess, email_message = send_email(values['-EMAIL-'], success)
+            if not email_sucess:
+                    sg.Popup(email_message)
+
 
         
     window.close()
 
 main()
+
 
