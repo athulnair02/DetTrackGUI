@@ -2,6 +2,7 @@ import os
 import os.path as path
 from datetime import datetime
 import re
+from sre_constants import SUCCESS
 from typing import Dict
 import PySimpleGUI as sg
 import subprocess
@@ -12,14 +13,17 @@ DETECTION_TEMPLATE = '/nfs/scratch/athul/DetTrackGUI/DetectionNTracking_template
 DETECTION_RESULT = 'DetectionNTracking_result.m'
 CALIBRATION_DIRNAME = 'LLSCalibrations'
 
+SUCCESS_EMAIL = 'Hello! \n\nYour Detection & Tracking has finished running! Please check the GUI and your results.\n\nBest,\nMr. GUI'
+FAILURE_EMAIL = 'Uh Oh! \n\nYour Detection & Tracking has come across an ERROR! Please check the GUI and your results.\n\nBest,\nMr. GUI'
+
 CHANNELS = []
 
 CHNAME_DICT = {}
 
-MKDIR = True
+MKDIR = False
 RUN = MKDIR
 
-# TODO get calib path from experiment, cs, and parent_dir
+# TODO get calib path from parent_dir
 def get_calibration_path(dir_path):
     basename = path.basename(dir_path)
     if basename.startswith('Ex'):
@@ -30,9 +34,9 @@ def get_calibration_path(dir_path):
         pass
     
     if not path.isdir(calibration_path):
-        return (False, f'Error: Calibration folder not found. Ensure it is named \"{CALIBRATION_DIRNAME}\" and is in the same directory as the Cover Slip directories.')
+        raise Exception(f'Error: Calibration folder not found. Ensure it is named \"{CALIBRATION_DIRNAME}\" and is in the same directory as the Cover Slip directories.')
 
-    return (True, calibration_path)
+    return calibration_path
 
 def list_to_qstr(lst: list):
     lst = lst.copy()
@@ -56,7 +60,7 @@ def fill_dnt_template(condDir: str, chNames_lst: list, markers_lst: list, data_f
         result_path = DETECTION_RESULT
 
     if RUN and not path.exists(backup_dir):
-        return (False, 'Error: backup folder not found in primary channel\'s analysis directory. Please ensure directories follow procedural organization and naming practices')
+        raise Exception('Error: backup folder not found in primary channel\'s analysis directory. Please ensure directories follow procedural organization and naming practices')
 
     # PSFs, Default Sigmas Fill
     psfs = ''
@@ -95,21 +99,11 @@ def fill_dnt_template(condDir: str, chNames_lst: list, markers_lst: list, data_f
         else:
             filedata = filedata.replace('%bleach_option%', '%')
 
-        # if cme_viewer:
-        #     filedata = filedata.replace('%cme_viewer_option%', '')
-        # else:
-        #     filedata = filedata.replace('%cme_viewer_option%', '%')
-
-        # if labview:
-        #     filedata = filedata.replace('%labview_conversion_option%', '')
-        # else:
-        #     filedata = filedata.replace('%labview_conversion_option%', '%')
-
     # Write the file out again
     with open(result_path, 'w+') as file:
         file.write(filedata)
     
-    return (True, result_path)
+    return result_path
 
 def get_zspace(experiment_path: str):
     experiment = path.basename(experiment_path)
@@ -118,9 +112,9 @@ def get_zspace(experiment_path: str):
     try:
         zspace = float(zspace_str)
     except:
-        return (False, 'Error: zpsace name on folder cannot be parsed for float. Ensure it looks like "_z0p5"')
+        raise('Error: zpsace name on folder cannot be parsed for float. Ensure it looks like "_z0p5"')
 
-    return (True, zspace_str)
+    return zspace_str
 
 def get_sigmas(window, values: Dict, channels_index: list):
     sigmas = [] # TODO check this
@@ -136,15 +130,15 @@ def get_sigmas(window, values: Dict, channels_index: list):
             try:
                 float(sigmaXY)
                 float(sigmaZ)
-            except Exception as e:
-                return (False, 'Error: Please enter both fields and only use floats for custom sigma values.')
+            except:
+                raise Exception('Error: Please enter both fields and only use floats for custom sigma values.')
             sigmas.append(f'{sigmaXY}, {sigmaZ}')
         else:
             channel = values[f'-CH-{i}-']
             sigmas.append(f'sigmaXY{channel}, sigmaZ{channel}corr')
 
 
-    return (True, '; '.join(sigmas)) 
+    return '; '.join(sigmas) 
 
 def get_overwrites(values: Dict):
     deskew = "false, "
@@ -167,7 +161,7 @@ def check_one_or_none(a: bool, b: bool, c: bool):
 def get_channels(values: Dict):
     # check if primary channel is filled
     if values['-CH-1-'] == '':
-        return (False, 'Error: Ensure primary channel is not empty.', None, None)
+        raise Exception('Error: Ensure primary channel is not empty.')
 
     # check if selected channels have markers filled
     channels = []
@@ -178,28 +172,28 @@ def get_channels(values: Dict):
         marker = values[f'-MARKER-{i}-']
         if channel != '':
             if marker == '':
-                return (False, 'Error: Ensure marker is entered for selected channels.', None, None)
+                raise Exception('Error: Ensure marker is entered for selected channels.')
             channels.append(channel)
             channels_index.append(i)
             markers.append(marker)
 
     # check channels selected only once
     if len(channels) != len(set(channels)):
-        return (False, 'Error: Ensure a wavelength is selected only for one channel.', None, None)
+        raise Exception('Error: Ensure a wavelength is selected only for one channel.')
 
-    return (True, channels, markers, channels_index)
+    return (channels, markers, channels_index)
 
 def load_channels(calibration_path):
     channels = filter(lambda x: x.endswith('totalPSF.tif'), os.listdir(calibration_path))
     channels = list(map(lambda x: re.findall(r'\d+', x)[0], channels))
     channels.sort()
     if not channels:
-        return (False, 'Error: No channels found in calibration folder')
+        raise Exception('Error: No channels found in calibration folder')
 
     global CHANNELS
     CHANNELS = channels
 
-    return (True, channels)
+    return channels
 
 # TODO: update for exisitng channels
 def build_dict(experiment_path):
@@ -224,17 +218,17 @@ def get_tracking_radius(values: Dict):
         upper_bound = values['-TRACKING-RADIUS-UPPER-']
         
         if bool(lower_bound == '') ^ bool(upper_bound == ''):
-            return (False, 'Error: Please enter both lower and upper bounds if not using the default tracking radius')
+            raise Exception('Error: Please enter both lower and upper bounds if not using the default tracking radius')
         elif lower_bound == '' and upper_bound == '':
             lower_bound = '3'
             upper_bound = '6'
         elif int(lower_bound) >= int(upper_bound):
-            return (False, 'Error: Please ensure the lower bound is less than the upper bound for the tracking radius')
+            raise Exception('Error: Please ensure the lower bound is less than the upper bound for the tracking radius')
 
     except Exception as e:
-        return (False, 'Error: Please enter only numbers for the tracking radius')
+        raise Exception('Error: Please enter only numbers for the tracking radius')
     else:
-        return (True, lower_bound + ' ' + upper_bound)
+        return lower_bound + ' ' + upper_bound
 
 def get_apath(experiment_path: str, primary_chName: str, mkdir: bool=True):
     apath = path.join(experiment_path, primary_chName, 'Analysis', '')
@@ -294,7 +288,9 @@ def run_cmd(det_track_path: str):
     print('stderr: ' + p1.stderr)
     print('returncode: ' + str(p1.returncode))
 
-    return (p1.stderr == '', p1.stderr)
+    if p1.stderr != '':
+        raise Exception(f'Error: run failed.\n {p1.stderr}')
+
 
 # TODO deal with possible errors, add files after bleach_in_a_box
 def move_files_to_backup(apath: str, backup_dir: str, bleach: bool):
@@ -310,14 +306,10 @@ def move_files_to_backup(apath: str, backup_dir: str, bleach: bool):
         print(f'stderr {file}: ' + p.stderr)
 
 def run_experiment(window, values: Dict, experiment_path: str, backup_dirname: str=None):
-    calibration_success, calibration_path = get_calibration_path(experiment_path)
+    calibration_path = get_calibration_path(experiment_path)
     print('Calibration dir:', calibration_path)
-    if not calibration_success:
-        return (calibration_success, calibration_path)
     
-    ch_success, channels, markers, channels_index = get_channels(values)
-    if not ch_success:
-        return (ch_success, channels)
+    channels, markers, channels_index = get_channels(values)
 
     build_dict(experiment_path)
     print('Channel name dictionary:', CHNAME_DICT)
@@ -326,27 +318,20 @@ def run_experiment(window, values: Dict, experiment_path: str, backup_dirname: s
     print('Channel names:', chNames)
 
     if not check_channel_paths(chNames, experiment_path):
-        return (False, f'Error: Channel data directory not found in experiment directory {experiment_path}. Please ensure it is there.')
+        raise Exception('Error: Channel data directory not found in experiment directory {experiment_path}. Please ensure it is there.')
 
     print('Markers:', markers)
 
-    zspace_success, zspace = get_zspace(experiment_path)
-    if not zspace_success:
-        return (zspace_success, zspace)
+    zspace = get_zspace(experiment_path)
     print('Zspace:', zspace)
 
-    sigma_sucess, sigma_values = get_sigmas(window, values, channels_index)
-    if not sigma_sucess:
-        return (sigma_sucess, sigma_values)
-
+    sigma_values = get_sigmas(window, values, channels_index)
     print('Sigma Values:', sigma_values)
 
     overwrite_values = get_overwrites(values)
     print('Overwrite Values:', overwrite_values)
 
-    tracking_radius_success, tracking_radius_values = get_tracking_radius(values)
-    if not tracking_radius_success:
-        return (tracking_radius_success, tracking_radius_values)
+    tracking_radius_values = get_tracking_radius(values)
     print('Tracking Radius Values:', tracking_radius_values)
 
     apath = get_apath(experiment_path, chNames[0], mkdir=MKDIR)
@@ -363,28 +348,19 @@ def run_experiment(window, values: Dict, experiment_path: str, backup_dirname: s
     calc_img_proj = values['-CALCIMGPROJ-']
     bleach = values['-BLEACH-']
 
-    fill_succes, result_path = fill_dnt_template(experiment_path, chNames, markers, data_filepath, calibration_path, zspace, sigma_values, overwrite_values, tracking_radius_values, backup_dir, calc_img_proj, bleach)
-    
-    if not fill_succes:
-        return (fill_succes, result_path)
+    result_path = fill_dnt_template(experiment_path, chNames, markers, data_filepath, calibration_path, zspace, sigma_values, overwrite_values, tracking_radius_values, backup_dir, calc_img_proj, bleach)
 
     if RUN:
-        run_success, run_error =  run_cmd(result_path)
-
-        if not run_success:
-            return (run_success, f'Error: run failed.\n {run_error}')
-
+        run_cmd(result_path)
         print('Run worked :)')
 
         move_files_to_backup(apath, backup_dir, bleach)
-
-    return (True, None)
 
 def run_cover_slip(window, values: Dict, cs_path: str):
     # Run each experiment in the cover slip dir
     experiment_lst = list(filter(lambda x: x.startswith('Ex'), os.listdir(cs_path)))
     if not experiment_lst:
-        return (False, 'Error: No experiments found in cover slip directory. Please ensure experiments begin with "Ex"')
+        raise Exception('Error: No experiments found in cover slip directory. Please ensure experiments begin with "Ex"')
     print('Experiment list:', experiment_lst)
 
     backup_dirname = datetime.now().strftime('backup_%m_%d_%Y_%H_%M')
@@ -393,22 +369,21 @@ def run_cover_slip(window, values: Dict, cs_path: str):
     for experiment in experiment_lst:
         experiment_path = path.join(cs_path, experiment)
         print(f'Running on {experiment_path}')
-        success, message = run_experiment(window, values, experiment_path, backup_dirname)
-        if not success:
-            return (success, experiment + ' ' + message)
 
-    return (True, None)
+        try:
+            run_experiment(window, values, experiment_path, backup_dirname)
+        except Exception as e:
+            raise Exception(experiment + ' ' + e)
+
     
-def send_email(recepient: str, success: bool):
+def send_email(recepient: str, success_msg: str):
     if recepient == '':
-        return (True, 'No email')
+        sg.Popup('No email')
+        return
 
     try:
         msg = EmailMessage()
-        if success:
-            msg.set_content('Hello! \n\nYour Detection & Tracking has finished running! Please check the GUI and your results.\n\nBest,\nMr. GUI')
-        else:
-            msg.set_content('Uh Oh! \n\nYour Detection & Tracking has come across an ERROR! Please check the GUI and your results.\n\nBest,\nMr. GUI')
+        msg.set_content(success_msg)
         msg['Subject'] = 'Detection & Tracking Update'
         msg['From'] = 'tklab@tklab.hms.harvard.edu'
         msg['To'] = recepient
@@ -420,9 +395,9 @@ def send_email(recepient: str, success: bool):
         server.send_message(msg)
         server.quit()
         print('Email Sent')
-        return (True, None)
+        sg.Popup('Email Sent!')
     except:
-        return (False, 'Bad email entered, please try again!')
+        sg.Popup('Bad email entered, please try again!')
 
 
 def main():        
@@ -510,7 +485,7 @@ def main():
     custom_sigmas_cols = layout[7]
 
     for i in range(1, 4):
-        cs_str = f'Channel #{i} Custom Sigmas' ## TODO 
+        cs_str = f'Channel #{i} Custom Sigmas'
         custom_sigma_col = [
             [sg.Checkbox(cs_str, enable_events=True, key=f'-CS{i}-')],
             [sg.Text('XY:', key=f'-CS{i}XYT-'), sg.In(size=(4,1), key=f'-CS{i}XY-')],
@@ -518,11 +493,10 @@ def main():
         ]
         custom_sigmas_cols.append(sg.Column(custom_sigma_col, element_justification='c', visible=False, key=f'-CS{i}COL-'))
 
-
     window = sg.Window(title='Detection and Tracking', layout=layout, margins=(100,50)) 
     while True:
         event, values = window.read()
-        
+
         if event == sg.WIN_CLOSED or event=="Exit" or event == None:
             break
 
@@ -538,13 +512,12 @@ def main():
                 sg.Popup('Folder chosen does not match option selected. Please change the option or folder')
                 window['-FOLDER-'].update('')
             else:
-                calibration_success, calibration_path = get_calibration_path(values['-FOLDER-'])
-                if not calibration_success:
-                    sg.Popup(calibration_path)  
-                else:    
-                    channels_success, channels = load_channels(calibration_path) 
-                    if not channels_success:
-                        sg.Popup(channels) 
+                try:
+                    calibration_path = get_calibration_path(values['-FOLDER-'])
+                    channels = load_channels(calibration_path) 
+                except Exception as e:
+                    sg.Popup(e) 
+                else:
                     update_channel_dropdowns(window)
                     print('Detected Channels:', channels)           
 
@@ -557,23 +530,20 @@ def main():
         elif event == '-RUN-':
             print('RUNNING')
             if option_chosen == 'Cover Slip':
-                success, message = run_cover_slip(window, values, values['-FOLDER-'])
-                if not success:
-                    sg.Popup(message)
+                try:
+                    run_cover_slip(window, values, values['-FOLDER-'])
+                except Exception as e:
+                    sg.Popup(e)
 
             elif option_chosen == 'Experiment':
-                success, message = run_experiment(window, values, values['-FOLDER-'])
-                if not success:
-                    sg.Popup(message)
+                try:
+                    run_experiment(window, values, values['-FOLDER-'])
+                except Exception as e:
+                    sg.Popup(e)
+                    send_email(values['-EMAIL-'], FAILURE_EMAIL)
+                else:
+                    send_email(values['-EMAIL-'], SUCCESS_EMAIL)
 
-            email_sucess, email_message = send_email(values['-EMAIL-'], success)
-            if not email_sucess:
-                    sg.Popup(email_message)
-
-
-        
     window.close()
 
 main()
-
-
