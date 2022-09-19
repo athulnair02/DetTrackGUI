@@ -2,12 +2,24 @@ import os
 import os.path as path
 from datetime import datetime
 import re
-from sre_constants import SUCCESS
 from typing import Dict
 import PySimpleGUI as sg
 import subprocess
 import smtplib
 from email.message import EmailMessage
+
+
+class GUIError(Exception):
+    """Exception raised for errors in the GUI unrelated to subprocess errors.
+       Made for the purpose of not sending an email regarding simple GUI
+
+    Attributes:
+        message -- explanation of the error
+    """
+
+    def __init__(self, message):
+        self.message = message
+        super().__init__(self.message)
 
 DETECTION_TEMPLATE = '/nfs/scratch/athul/DetTrackGUI/DetectionNTracking_template.m'
 DETECTION_RESULT = 'DetectionNTracking_result.m'
@@ -26,6 +38,7 @@ RUN = MKDIR
 # TODO get calib path from parent_dir
 def get_calibration_path(dir_path):
     basename = path.basename(dir_path)
+    calibration_path = ''
     if basename.startswith('Ex'):
         calibration_path = path.join(path.dirname(path.dirname(dir_path)), CALIBRATION_DIRNAME)
     elif basename.startswith('CS'):
@@ -34,7 +47,7 @@ def get_calibration_path(dir_path):
         pass
     
     if not path.isdir(calibration_path):
-        raise Exception(f'Error: Calibration folder not found. Ensure it is named \"{CALIBRATION_DIRNAME}\" and is in the same directory as the Cover Slip directories.')
+        raise GUIError(f'Error: Calibration folder not found. Ensure it is named \"{CALIBRATION_DIRNAME}\" and is in the same directory as the Cover Slip directories.')
 
     return calibration_path
 
@@ -60,7 +73,7 @@ def fill_dnt_template(condDir: str, chNames_lst: list, markers_lst: list, data_f
         result_path = DETECTION_RESULT
 
     if RUN and not path.exists(backup_dir):
-        raise Exception('Error: backup folder not found in primary channel\'s analysis directory. Please ensure directories follow procedural organization and naming practices')
+        raise GUIError('Error: backup folder not found in primary channel\'s analysis directory. Please ensure directories follow procedural organization and naming practices')
 
     # PSFs, Default Sigmas Fill
     psfs = ''
@@ -131,7 +144,7 @@ def get_sigmas(window, values: Dict, channels_index: list):
                 float(sigmaXY)
                 float(sigmaZ)
             except:
-                raise Exception('Error: Please enter both fields and only use floats for custom sigma values.')
+                raise GUIError('Error: Please enter both fields and only use floats for custom sigma values.')
             sigmas.append(f'{sigmaXY}, {sigmaZ}')
         else:
             channel = values[f'-CH-{i}-']
@@ -161,7 +174,7 @@ def check_one_or_none(a: bool, b: bool, c: bool):
 def get_channels(values: Dict):
     # check if primary channel is filled
     if values['-CH-1-'] == '':
-        raise Exception('Error: Ensure primary channel is not empty.')
+        raise GUIError('Error: Ensure primary channel is not empty.')
 
     # check if selected channels have markers filled
     channels = []
@@ -172,14 +185,14 @@ def get_channels(values: Dict):
         marker = values[f'-MARKER-{i}-']
         if channel != '':
             if marker == '':
-                raise Exception('Error: Ensure marker is entered for selected channels.')
+                raise GUIError('Error: Ensure marker is entered for selected channels.')
             channels.append(channel)
             channels_index.append(i)
             markers.append(marker)
 
     # check channels selected only once
     if len(channels) != len(set(channels)):
-        raise Exception('Error: Ensure a wavelength is selected only for one channel.')
+        raise GUIError('Error: Ensure a wavelength is selected only for one channel.')
 
     return (channels, markers, channels_index)
 
@@ -188,7 +201,7 @@ def load_channels(calibration_path):
     channels = list(map(lambda x: re.findall(r'\d+', x)[0], channels))
     channels.sort()
     if not channels:
-        raise Exception('Error: No channels found in calibration folder')
+        raise GUIError('Error: No channels found in calibration folder')
 
     global CHANNELS
     CHANNELS = channels
@@ -218,15 +231,15 @@ def get_tracking_radius(values: Dict):
         upper_bound = values['-TRACKING-RADIUS-UPPER-']
         
         if bool(lower_bound == '') ^ bool(upper_bound == ''):
-            raise Exception('Error: Please enter both lower and upper bounds if not using the default tracking radius')
+            raise GUIError('Error: Please enter both lower and upper bounds if not using the default tracking radius')
         elif lower_bound == '' and upper_bound == '':
             lower_bound = '3'
             upper_bound = '6'
         elif int(lower_bound) >= int(upper_bound):
-            raise Exception('Error: Please ensure the lower bound is less than the upper bound for the tracking radius')
+            raise GUIError('Error: Please ensure the lower bound is less than the upper bound for the tracking radius')
 
     except Exception as e:
-        raise Exception('Error: Please enter only numbers for the tracking radius')
+        raise GUIError('Error: Please enter only numbers for the tracking radius')
     else:
         return lower_bound + ' ' + upper_bound
 
@@ -318,7 +331,7 @@ def run_experiment(window, values: Dict, experiment_path: str, backup_dirname: s
     print('Channel names:', chNames)
 
     if not check_channel_paths(chNames, experiment_path):
-        raise Exception('Error: Channel data directory not found in experiment directory {experiment_path}. Please ensure it is there.')
+        raise GUIError('Error: Channel data directory not found in experiment directory {experiment_path}. Please ensure it is there.')
 
     print('Markers:', markers)
 
@@ -360,7 +373,7 @@ def run_cover_slip(window, values: Dict, cs_path: str):
     # Run each experiment in the cover slip dir
     experiment_lst = list(filter(lambda x: x.startswith('Ex'), os.listdir(cs_path)))
     if not experiment_lst:
-        raise Exception('Error: No experiments found in cover slip directory. Please ensure experiments begin with "Ex"')
+        raise GUIError('Error: No experiments found in cover slip directory. Please ensure experiments begin with "Ex"')
     print('Experiment list:', experiment_lst)
 
     backup_dirname = datetime.now().strftime('backup_%m_%d_%Y_%H_%M')
@@ -372,6 +385,8 @@ def run_cover_slip(window, values: Dict, cs_path: str):
 
         try:
             run_experiment(window, values, experiment_path, backup_dirname)
+        except GUIError as e:
+            raise GUIError(e)
         except Exception as e:
             raise Exception(experiment + ' ' + e)
 
@@ -532,12 +547,16 @@ def main():
             if option_chosen == 'Cover Slip':
                 try:
                     run_cover_slip(window, values, values['-FOLDER-'])
+                except GUIError as e:
+                    sg.Popup(e)
                 except Exception as e:
                     sg.Popup(e)
 
             elif option_chosen == 'Experiment':
                 try:
                     run_experiment(window, values, values['-FOLDER-'])
+                except GUIError as e:
+                    sg.Popup(e)
                 except Exception as e:
                     sg.Popup(e)
                     send_email(values['-EMAIL-'], FAILURE_EMAIL)
