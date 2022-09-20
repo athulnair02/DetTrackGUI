@@ -1,5 +1,7 @@
 import os
 import os.path as path
+import asyncio
+import time
 from datetime import datetime
 import re
 from typing import Dict
@@ -32,7 +34,7 @@ CHANNELS = []
 
 CHNAME_DICT = {}
 
-MKDIR = False
+MKDIR = True
 RUN = MKDIR
 
 # TODO get calib path from parent_dir
@@ -293,17 +295,34 @@ def show_sigmas(window, values: Dict, selected_lst: list, event: str):
         window[f'-CS{i}ZT-'].update(visible=values[f'-CS{i}-'])
         window[f'-CS{i}Z-'].update(visible=values[f'-CS{i}-'])
 
-def run_cmd(det_track_path: str):
+async def timer(window, start_time: float, run_timer: list):
+    elapsed = 0
+    while run_timer[0]:
+        elapsed = int(time.time() - start_time)
+        await asyncio.sleep(1)
+        window['-TIMER-'].update(f'Time elapsed: {elapsed}s')
+        window.refresh()
+
+async def run_cmd(det_track_path: str, run_timer: list):
     matlab_cmd = f'matlab -nodisplay -nosplash -nodesktop -r "run(\'{det_track_path}\');exit;" | tail -n +13'
     print(matlab_cmd)
-    p1 = subprocess.run(matlab_cmd, capture_output=True, text=True, shell=True, input='exit;')
-    print('stdout: ' + p1.stdout)
-    print('stderr: ' + p1.stderr)
-    print('returncode: ' + str(p1.returncode))
 
-    if p1.stderr != '':
-        raise Exception(f'Error: run failed.\n {p1.stderr}')
+    p1 = await asyncio.create_subprocess_shell(
+        matlab_cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE)
 
+    stdout, stderr = await p1.communicate(input=b'exit;')
+
+    run_timer[0] = False
+
+    print(f'[exited with {p1.returncode}]')
+    if stdout:
+        print(f'[stdout]\n{stdout.decode()}')
+    if stderr:
+        print(f'[stderr]\n{stderr.decode()}')
+        raise Exception(f'Error: run failed.\n {stderr}')
 
 # TODO deal with possible errors, add files after bleach_in_a_box
 def move_files_to_backup(apath: str, backup_dir: str, bleach: bool):
@@ -318,7 +337,7 @@ def move_files_to_backup(apath: str, backup_dir: str, bleach: bool):
         p = subprocess.run(f'cp {file} {backup_dir}', capture_output=True, text=True, shell=True)
         print(f'stderr {file}: ' + p.stderr)
 
-def run_experiment(window, values: Dict, experiment_path: str, backup_dirname: str=None):
+async def run_experiment(window, values: Dict, experiment_path: str, run_timer: list, backup_dirname: str=None):
     calibration_path = get_calibration_path(experiment_path)
     print('Calibration dir:', calibration_path)
     
@@ -364,12 +383,14 @@ def run_experiment(window, values: Dict, experiment_path: str, backup_dirname: s
     result_path = fill_dnt_template(experiment_path, chNames, markers, data_filepath, calibration_path, zspace, sigma_values, overwrite_values, tracking_radius_values, backup_dir, calc_img_proj, bleach)
 
     if RUN:
-        run_cmd(result_path)
+        await run_cmd(result_path, run_timer)
         print('Run worked :)')
 
         move_files_to_backup(apath, backup_dir, bleach)
+    else:
+        run_timer[0] = False
 
-def run_cover_slip(window, values: Dict, cs_path: str):
+def run_cover_slip(window, values: Dict, cs_path: str, run_timer: list):
     # Run each experiment in the cover slip dir
     experiment_lst = list(filter(lambda x: x.startswith('Ex'), os.listdir(cs_path)))
     if not experiment_lst:
@@ -384,12 +405,11 @@ def run_cover_slip(window, values: Dict, cs_path: str):
         print(f'Running on {experiment_path}')
 
         try:
-            run_experiment(window, values, experiment_path, backup_dirname)
+            run_experiment(window, values, experiment_path, run_timer, backup_dirname)
         except GUIError as e:
             raise GUIError(e)
         except Exception as e:
             raise Exception(experiment + ' ' + e)
-
     
 def send_email(recepient: str, success_msg: str):
     if recepient == '':
@@ -414,8 +434,7 @@ def send_email(recepient: str, success_msg: str):
     except:
         sg.Popup('Bad email entered, please try again!')
 
-
-def main():        
+async def main():        
     option_chosen = 'Cover Slip'
     sg.theme('Tan')
 
@@ -425,7 +444,7 @@ def main():
         [sg.Text(' ')]
     ]
 
-    layout = [
+    dt_layout = [
         # Selecting what to run detection on
         [
             sg.Text('Run detection on*:', size=(17, 1)),
@@ -481,23 +500,28 @@ def main():
         ],
         # Run button
         [
-            sg.Button('Run', key='-RUN-')
+            sg.Button('Run', key='-RUN-'),
+            sg.Text(text_color='red', key='-FINISHED-')
         ],
         # Legend
         [
             sg.Text('* = Required')
+        ],
+        # Timer
+        [
+            sg.Text(key='-TIMER-')
         ]
     ]
 
     # Adding channel and marker components to layout
     for i in range(2, 5):
-        elem = layout[i]
+        elem = dt_layout[i]
         elem.append(sg.Combo(values=CHANNELS, readonly=True, enable_events=True, size=(4, 1) ,key=f'-CH-{i - 1}-'))
         elem.append(sg.Text('Enter a marker:'))
         elem.append(sg.In(size=(5,1), key=f'-MARKER-{i - 1}-'))
 
     # Adding custom sigma components to layout
-    custom_sigmas_cols = layout[7]
+    custom_sigmas_cols = dt_layout[7]
 
     for i in range(1, 4):
         cs_str = f'Channel #{i} Custom Sigmas'
@@ -508,7 +532,20 @@ def main():
         ]
         custom_sigmas_cols.append(sg.Column(custom_sigma_col, element_justification='c', visible=False, key=f'-CS{i}COL-'))
 
-    window = sg.Window(title='Detection and Tracking', layout=layout, margins=(100,50)) 
+
+    tab_group = [
+        [sg.TabGroup(
+                [[
+                    sg.Tab('DetectionNTracking', dt_layout),
+                    sg.Tab('Data Acquisition', [[]])
+                ]],
+                tab_location='centertop'
+            )
+        ]
+    ]
+
+
+    window = sg.Window(title='Detection and Tracking', layout=tab_group, margins=(100,50)) 
     while True:
         event, values = window.read()
 
@@ -544,9 +581,10 @@ def main():
 
         elif event == '-RUN-':
             print('RUNNING')
+            run_timer = [True]
             if option_chosen == 'Cover Slip':
                 try:
-                    run_cover_slip(window, values, values['-FOLDER-'])
+                    run_cover_slip(window, values, values['-FOLDER-'], run_timer)
                 except GUIError as e:
                     sg.Popup(e)
                 except Exception as e:
@@ -554,7 +592,10 @@ def main():
 
             elif option_chosen == 'Experiment':
                 try:
-                    run_experiment(window, values, values['-FOLDER-'])
+                    window['-RUN-'].update(disabled=True)
+                    await asyncio.gather(run_experiment(window, values, values['-FOLDER-'], run_timer), timer(window, time.time(), run_timer))
+                    window['-RUN-'].update(disabled=False)
+                    window['-FINISHED-'].update('Run Complete')
                 except GUIError as e:
                     sg.Popup(e)
                 except Exception as e:
@@ -565,4 +606,4 @@ def main():
 
     window.close()
 
-main()
+asyncio.run(main())
