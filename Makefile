@@ -2,12 +2,12 @@ test:
 	echo working
 
 freeze:
-	rm DT_GUI
+	-rm DT_GUI
 	pyinstaller DT_GUI.py --onefile
 	-rm *.spec
 	-rm -rf build
 	mv dist/DT_GUI .
-	-rm dist
+	-rm -rf dist
 
 activate:
 	conda activate guienv
