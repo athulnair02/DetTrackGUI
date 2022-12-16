@@ -390,7 +390,7 @@ async def run_experiment(window, values: Dict, experiment_path: str, run_timer: 
     else:
         run_timer[0] = False
 
-def run_cover_slip(window, values: Dict, cs_path: str, run_timer: list):
+async def run_cover_slip(window, values: Dict, cs_path: str, run_timer: list):
     # Run each experiment in the cover slip dir
     experiment_lst = list(filter(lambda x: x.startswith('Ex'), os.listdir(cs_path)))
     if not experiment_lst:
@@ -405,11 +405,16 @@ def run_cover_slip(window, values: Dict, cs_path: str, run_timer: list):
         print(f'Running on {experiment_path}')
 
         try:
-            run_experiment(window, values, experiment_path, run_timer, backup_dirname)
+            await run_experiment(window, values, experiment_path, [False], backup_dirname)
         except GUIError as e:
+            timer[0] = False
             raise GUIError(e)
         except Exception as e:
+            timer[0] = False
             raise Exception(experiment + ' ' + e)
+
+    run_timer[0] = False
+        
     
 def send_email(recepient: str, success_msg: str):
     if recepient == '':
@@ -580,15 +585,26 @@ async def main():
             show_sigmas(window, values, selected_lst, event)
 
         elif event == '-RUN-':
+            if values['-EMAIL-'] == '':
+                print('No email provided')
+                sg.Popup('No email')
+                continue
+
             print('RUNNING')
             run_timer = [True]
             if option_chosen == 'Cover Slip':
                 try:
-                    run_cover_slip(window, values, values['-FOLDER-'], run_timer)
+                    window['-RUN-'].update(disabled=True)
+                    await asyncio.gather(run_cover_slip(window, values, values['-FOLDER-'], run_timer), timer(window, time.time(), run_timer))
+                    window['-RUN-'].update(disabled=False)
+                    window['-FINISHED-'].update('Run Complete')
                 except GUIError as e:
                     sg.Popup(e)
                 except Exception as e:
                     sg.Popup(e)
+                    send_email(values['-EMAIL-'], FAILURE_EMAIL)
+                else:
+                    send_email(values['-EMAIL-'], SUCCESS_EMAIL)
 
             elif option_chosen == 'Experiment':
                 try:
