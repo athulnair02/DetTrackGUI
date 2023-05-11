@@ -436,7 +436,8 @@ def send_email(recepient: str, success_msg: str):
         server.quit()
         print('Email Sent')
         sg.Popup('Email Sent!')
-    except:
+    except Exception as e:
+        print('email err', e)
         sg.Popup('Bad email entered, please try again!')
 
 async def main():        
@@ -623,3 +624,4 @@ async def main():
     window.close()
 
 asyncio.run(main())
+# send_email('athulnair@utexas.edu', 'test')
