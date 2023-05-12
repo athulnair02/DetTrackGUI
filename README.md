@@ -17,7 +17,6 @@ and run that executable.
 
 ## Requirements
 ### File Structure Example
-└ │ ├ ─ 
 > Note: The deeper levels of the tree are not shown like the .tiff images inside the channel folders of the individual experiments or the files inside subfolders of LLSCalibrations
 ```
 .
