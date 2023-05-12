@@ -1,4 +1,5 @@
 # Detection and Tracking Graphical User Interface
+![image](https://github.com/athulnair02/DetTrackGUI/assets/42418601/237424b8-83d0-48e3-a085-b914495ef97d)
 
 ## Running the GUI
 
