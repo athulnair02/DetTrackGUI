@@ -8,6 +8,7 @@ from typing import Dict
 import PySimpleGUI as sg
 import subprocess
 import smtplib
+from secrets import lab_email, lab_password
 from email.message import EmailMessage
 
 
@@ -417,6 +418,11 @@ async def run_cover_slip(window, values: Dict, cs_path: str, run_timer: list):
         
     
 def send_email(recepient: str, success_msg: str):
+
+    print(lab_email, lab_password)
+
+    pass
+
     if recepient == '':
         sg.Popup('No email')
         return
@@ -431,7 +437,7 @@ def send_email(recepient: str, success_msg: str):
         server = smtplib.SMTP('smtp.gmail.com', 587)
 
         server.starttls()
-        server.login('tklab@tklab.hms.harvard.edu', 'Clathrin2020g')
+        server.login(lab_email, lab_password)
         server.send_message(msg)
         server.quit()
         print('Email Sent')

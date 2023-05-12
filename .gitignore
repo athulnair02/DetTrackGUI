@@ -1,4 +1,5 @@
 important_info.txt
 DetectionNTracking_result.m
 DT_GUI
-
+secrets.py
+__pycache__
