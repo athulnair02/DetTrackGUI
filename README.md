@@ -1,5 +1,7 @@
 # Detection and Tracking Graphical User Interface
 
+![Screenshot 2023-05-15 at 9 06 20 AM](https://github.com/athulnair02/DetTrackGUI/assets/42418601/7b9225b6-8f7c-4c6e-9aae-2b0353f043bc)
+
 ## Running the GUI
 
 In your terminal, run the command 
@@ -16,7 +18,6 @@ and run that executable.
 
 ## Requirements
 ### File Structure Example
-└ │ ├ ─ 
 > Note: The deeper levels of the tree are not shown like the .tiff images inside the channel folders of the individual experiments or the files inside subfolders of LLSCalibrations
 ```
 .
@@ -95,6 +96,9 @@ Ex01_488_300mW_560_500mW_642_500mW_z0p5
 Above is an example of a experiment folder after the program was run on it. In this case, the 642nm channel was the primary channel since that is where the Analysis folder has been generated. Within this folder, there are 4 `.mat` files and backup folders. The `.mat` files are the most recent output of the program and what is typically used for the next steps of the research process.
 
 The backup folders, however, were a feature added to keep track of what settings were used to run detection and tracking at a specific moment of time. In this case, the experiment was ran twice with channel 648nm as the primary channel. Once at 8/23/2023 00:17 and another at 9/15/2023 13:31. The files produced from the latter date is found both inside the backup folder and in the Analysis folder (duplicates). In the backup folder, there are 2 additional files saved. `data_642_488.mat` is the data stored for when the program was ran with channel 642nm as the primary and with one secondary channel 488nm as dictated by the filename. `DetectionNTracking_result.m` is the matlab file that was altered from a template to produce these results and can be viewed to ensure correct inputs and possibly alter for a even more customized result.
+
+## Future Improvements
+Any future improvements or suggestions can be redirected to @athulnair02 (athulnair@utexas.edu).
 
 ## Future Improvements
 Any future improvements or suggestions can be redirected to @athulnair02 (athulnair@utexas.edu).
