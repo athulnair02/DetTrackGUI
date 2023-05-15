@@ -99,6 +99,3 @@ The backup folders, however, were a feature added to keep track of what settings
 
 ## Future Improvements
 Any future improvements or suggestions can be redirected to @athulnair02 (athulnair@utexas.edu).
-
-## Future Improvements
-Any future improvements or suggestions can be redirected to @athulnair02 (athulnair@utexas.edu).
