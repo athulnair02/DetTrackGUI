@@ -3,7 +3,7 @@ test:
 
 freeze:
 	-rm DT_GUI
-	pyinstaller DT_GUI.py --onefile
+	pyinstaller --onefile DT_GUI.py 
 	-rm *.spec
 	-rm -rf build
 	mv dist/DT_GUI .
